@@ -1,0 +1,35 @@
+services:
+  - type: web
+    name: wingo-whatsapp-bot
+    runtime: node
+    plan: starter
+    buildCommand: npm install --include=dev && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 10000
+      - key: DATABASE_URL
+        sync: false
+      - key: JWT_SECRET
+        generateValue: true
+      - key: JWT_TTL
+        value: 8h
+      - key: COOKIE_NAME
+        value: wingo_session
+      - key: LOG_LEVEL
+        value: info
+      - key: WINGO_API_URL
+        value: https://draw.ar-lottery01.com/WinGo/WinGo_1M/GetHistoryIssuePage.json
+      - key: POLL_INTERVAL_SECONDS
+        value: 60
+      - key: CONFIDENCE_THRESHOLD
+        value: 65
+      - key: REQUEST_TIMEOUT_MS
+        value: 8000
+      - key: REQUEST_RETRIES
+        value: 3
+      - key: WA_RECONNECT_MAX_BACKOFF_MS
+        value: 30000
