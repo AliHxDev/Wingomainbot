@@ -1,4 +1,17 @@
-import makeWASocket, { Browsers, DisconnectReason } from '@whiskeysockets/baileys';
+import * as Baileys from '@whiskeysockets/baileys';
+
+const makeWASocket = typeof Baileys.default === 'function'
+  ? Baileys.default
+  : typeof Baileys.default?.default === 'function'
+    ? Baileys.default.default
+    : Baileys.makeWASocket;
+
+const Browsers = Baileys.Browsers;
+const DisconnectReason = Baileys.DisconnectReason;
+
+if (typeof makeWASocket !== 'function') {
+  throw new Error('Baileys makeWASocket export is unavailable. Check the installed @whiskeysockets/baileys version.');
+}
 import { query } from '../db/index.mjs';
 import { env } from '../config/env.mjs';
 import { logger } from '../utils/logger.mjs';
