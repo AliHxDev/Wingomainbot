@@ -1,0 +1,52 @@
+services:
+  - type: web
+    name: wingo-backend
+    runtime: node
+    rootDir: backend
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        fromDatabase:
+          name: wingo-db
+          property: connectionString
+      - key: FRONTEND_URL
+        sync: false
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: JWT_SECRET
+        sync: false
+      - key: AUTH_REQUIRED
+        value: "true"
+      - key: PAIRING_WAIT_MS
+        value: "25000"
+      - key: SIGNAL_LOOP_MS
+        value: "60000"
+      - key: PAIRING_POLL_MS
+        value: "1000"
+      - key: CHANNEL_SEND_RETRIES
+        value: "3"
+      - key: RECONNECT_COOLDOWN_MS
+        value: "5000"
+      - key: WINGO_API_URL
+        value: https://draw.ar-lottery01.com/WinGo/WinGo_1M/GetHistoryIssuePage.json
+      - key: WINGO_HTTP_TIMEOUT_MS
+        value: "12000"
+      - key: WINGO_HTTP_RETRIES
+        value: "3"
+      - key: BAILEYS_AUTH_FILE
+        value: /var/data/baileys-auth.json
+      - key: BAILEYS_LOG_LEVEL
+        value: silent
+      - key: LOG_LEVEL
+        value: info
+      - key: TIME_ZONE
+        value: UTC
+
+databases:
+  - name: wingo-db
+    plan: free
