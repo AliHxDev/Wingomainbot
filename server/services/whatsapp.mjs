@@ -40,6 +40,10 @@ export class WhatsAppManager {
     this.lastError = null;
     this.phone = null;
     this.stopped = false;
+    this.pairingActive = false;
+    this.pairingExpiresTimer = null;
+    this.pairingRecoveryAttempts = 0;
+    this.pairingRecoveryTimer = null;
   }
 
   async init() {
@@ -87,7 +91,7 @@ export class WhatsAppManager {
     const socket = makeWASocket({
       auth: this.auth.state,
       printQRInTerminal: false,
-      browser: Browsers.ubuntu('WinGo Signal Console'),
+      browser: Browsers.macOS('Desktop'),
       syncFullHistory: false,
       markOnlineOnConnect: false,
       generateHighQualityLinkPreview: false,
@@ -113,6 +117,11 @@ export class WhatsAppManager {
       this.reconnectAttempt = 0;
       this.lastError = null;
       this.lastPairingCode = null;
+      this.pairingActive = false;
+      this.pairingRecoveryAttempts = 0;
+      if (this.pairingRecoveryTimer) clearTimeout(this.pairingRecoveryTimer);
+      this.pairingRecoveryTimer = null;
+      this.clearPairingExpiry();
       this.phone = socket.user?.id?.split(':')[0] || socket.user?.id || null;
       await patchBotState({ status: 'open', connectedAt: new Date().toISOString(), lastError: null });
       logger.info({ phone: this.phone }, 'WhatsApp connection opened');
@@ -129,7 +138,7 @@ export class WhatsAppManager {
     this.lastError = safeErrorMessage(lastDisconnect?.error) || `Disconnected (${statusCode ?? 'unknown'})`;
     await patchBotState({ status: loggedOut ? 'logged_out' : 'disconnected', lastError: this.lastError });
     this.socket = null;
-    this.phone = null;
+    this.phone = this.pairingActive ? this.phone : null;
 
     if (loggedOut || badSession) {
       if (this.auth) await this.auth.clear().catch(error => logger.error({ err: error }, 'Failed clearing WhatsApp auth state'));
@@ -140,12 +149,58 @@ export class WhatsAppManager {
     }
 
     if (this.stopped || this.pairingPromise) return;
+    if (this.pairingActive) {
+      this.schedulePairingRecovery(reason, statusCode);
+      return;
+    }
     if (restartRequired) {
       this.reconnectAttempt = 0;
       await this.ensureSocket('restart-required');
       return;
     }
     this.scheduleReconnect(reason);
+  }
+
+  schedulePairingRecovery(reason = 'pairing-disconnect', statusCode = null) {
+    if (this.pairingRecoveryTimer || !this.pairingActive || this.stopped) return;
+    if (this.pairingRecoveryAttempts >= 3) {
+      this.pairingActive = false;
+      this.lastPairingCode = null;
+      this.lastError = `WhatsApp pairing connection closed (${statusCode ?? 'unknown'}). Generate a new code.`;
+      this.status = 'disconnected';
+      patchBotState({ status: 'disconnected', lastError: this.lastError }).catch(error => logger.warn({ err: error }, 'Failed updating pairing recovery state'));
+      return;
+    }
+    this.pairingRecoveryAttempts += 1;
+    const delay = Math.min(10000, 2000 * this.pairingRecoveryAttempts);
+    logger.warn({ reason, statusCode, attempt: this.pairingRecoveryAttempts, delay }, 'Pairing socket closed; refreshing pairing code');
+    this.pairingRecoveryTimer = setTimeout(async () => {
+      this.pairingRecoveryTimer = null;
+      if (!this.pairingActive || this.stopped || !this.phone) return;
+      const phoneNumber = this.phone;
+      try {
+        this.auth = null;
+        this.socket = null;
+        const socket = await this.ensureSocket('pairing-recovery');
+        if (!socket) throw new Error('Unable to recreate WhatsApp pairing socket');
+        await sleep(4000);
+        if (socket !== this.socket || !this.pairingActive) return;
+        const code = await socket.requestPairingCode(phoneNumber);
+        if (!code) throw new Error('WhatsApp returned an empty pairing code during recovery');
+        this.lastPairingCode = code;
+        this.lastError = null;
+        this.status = 'pairing';
+        this.armPairingExpiry();
+        await patchBotState({ status: 'pairing', lastError: null });
+        logger.info({ phone: phoneNumber, attempt: this.pairingRecoveryAttempts }, 'WhatsApp pairing code refreshed');
+      } catch (error) {
+        this.lastError = safeErrorMessage(error);
+        logger.warn({ err: error, attempt: this.pairingRecoveryAttempts }, 'WhatsApp pairing-code recovery failed');
+        this.socket = null;
+        this.auth = null;
+        this.schedulePairingRecovery('recovery-failed', null);
+      }
+    }, delay);
   }
 
   scheduleReconnect(reason = 'disconnect') {
@@ -179,6 +234,11 @@ export class WhatsAppManager {
     this.lastPairingCode = null;
     this.lastError = null;
     this.phone = phoneNumber;
+    this.pairingActive = false;
+    this.pairingRecoveryAttempts = 0;
+    if (this.pairingRecoveryTimer) clearTimeout(this.pairingRecoveryTimer);
+    this.pairingRecoveryTimer = null;
+    this.clearPairingExpiry();
 
     // A previous interrupted pairing can leave an unregistered credential
     // record and a half-open socket. Start pairing from a clean auth state.
@@ -222,6 +282,9 @@ export class WhatsAppManager {
         this.lastPairingCode = code;
         this.lastError = null;
         this.status = 'pairing';
+        this.pairingActive = true;
+        this.pairingRecoveryAttempts = 0;
+        this.armPairingExpiry();
         await patchBotState({ status: 'pairing', lastError: null });
         logger.info({ phone: phoneNumber, attempt }, 'WhatsApp pairing code generated');
         return code;
@@ -251,6 +314,8 @@ export class WhatsAppManager {
     }
 
     const message = safeErrorMessage(lastError) || 'WhatsApp pairing code could not be generated';
+    this.pairingActive = false;
+    this.clearPairingExpiry();
     this.status = 'disconnected';
     this.lastError = message;
     this.phone = phoneNumber;
@@ -280,6 +345,10 @@ export class WhatsAppManager {
   async reconnect() {
     this.stopped = false;
     this.clearReconnectTimer();
+    this.pairingActive = false;
+    if (this.pairingRecoveryTimer) clearTimeout(this.pairingRecoveryTimer);
+    this.pairingRecoveryTimer = null;
+    this.clearPairingExpiry();
     if (this.pairingPromise) throw new Error('WhatsApp pairing is currently in progress.');
     if (this.socket) {
       const old = this.socket;
@@ -318,11 +387,40 @@ export class WhatsAppManager {
   async shutdown() {
     this.stopped = true;
     this.clearReconnectTimer();
+    this.pairingActive = false;
+    if (this.pairingRecoveryTimer) clearTimeout(this.pairingRecoveryTimer);
+    this.pairingRecoveryTimer = null;
+    this.clearPairingExpiry();
     const socket = this.socket;
     this.socket = null;
     try { socket?.ws?.close(); } catch {}
     this.auth = null;
     this.status = 'disconnected';
+  }
+
+  armPairingExpiry() {
+    this.clearPairingExpiry();
+    this.pairingExpiresTimer = setTimeout(() => {
+      this.pairingExpiresTimer = null;
+      if (!this.pairingActive || this.status === 'open') return;
+      this.pairingActive = false;
+      this.lastPairingCode = null;
+      this.lastError = 'Pairing code expired. Generate a new code and try again.';
+      this.status = 'disconnected';
+      patchBotState({ status: 'disconnected', lastError: this.lastError }).catch(error => logger.warn({ err: error }, 'Failed updating expired pairing state'));
+      const socket = this.socket;
+      this.socket = null;
+      try {
+        socket?.ev?.removeAllListeners?.('creds.update');
+        socket?.ev?.removeAllListeners?.('connection.update');
+        socket?.ws?.close();
+      } catch {}
+    }, 120000);
+  }
+
+  clearPairingExpiry() {
+    if (this.pairingExpiresTimer) clearTimeout(this.pairingExpiresTimer);
+    this.pairingExpiresTimer = null;
   }
 
   clearReconnectTimer() {
