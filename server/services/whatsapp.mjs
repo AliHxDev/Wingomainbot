@@ -128,15 +128,46 @@ export class WhatsAppManager {
 
   async requestPairingCode(phoneNumber) {
     this.stopped = false;
-    if (this.socket && this.status === 'open') throw new Error('WhatsApp is already connected; use reconnect or logout before pairing again.');
-    const socket = await this.ensureSocket('pairing');
-    if (!socket) throw new Error('Unable to create WhatsApp socket');
-    await new Promise(resolve => setTimeout(resolve, 1500));
-    if (socket !== this.socket) throw new Error('WhatsApp socket changed while preparing pairing');
-    const code = await socket.requestPairingCode(phoneNumber);
-    this.lastPairingCode = code;
-    this.phone = phoneNumber;
-    return code;
+    if (this.socket && this.status === 'open') {
+      throw new Error('WhatsApp is already connected; use Logout WhatsApp before pairing another number.');
+    }
+
+    let lastError = null;
+    for (let attempt = 1; attempt <= 5; attempt += 1) {
+      const socket = await this.ensureSocket('pairing');
+      if (!socket) throw new Error('Unable to create WhatsApp socket');
+      if (socket !== this.socket) continue;
+
+      // Baileys needs the underlying WebSocket to finish its initial handshake
+      // before registration-node requests are reliable. Render cold starts can
+      // take several seconds, so a fixed short sleep is not sufficient.
+      const waitMs = Math.min(15000, 1000 + (attempt - 1) * 1000);
+      await new Promise(resolve => setTimeout(resolve, waitMs));
+      if (socket !== this.socket) continue;
+
+      try {
+        const code = await socket.requestPairingCode(phoneNumber);
+        if (!code) throw new Error('WhatsApp returned an empty pairing code');
+        this.lastPairingCode = code;
+        this.phone = phoneNumber;
+        this.lastError = null;
+        await patchBotState({ status:'pairing', lastError:null });
+        logger.info({ phone: phoneNumber, attempt }, 'WhatsApp pairing code generated');
+        return code;
+      } catch (error) {
+        lastError = error;
+        logger.warn({ err:error, attempt, phone:phoneNumber }, 'WhatsApp pairing-code request failed; retrying');
+        if (this.socket === socket && this.status === 'disconnected') {
+          this.socket = null;
+          this.auth = null;
+        }
+      }
+    }
+
+    const message = lastError?.message || 'WhatsApp pairing code could not be generated';
+    this.lastError = message;
+    await patchBotState({ status:'disconnected', lastError:message });
+    throw new Error(`Unable to generate WhatsApp pairing code after several connection attempts: ${message}`);
   }
 
   async send(text) {
