@@ -49,7 +49,7 @@ app.use((error,req,res,next)=>{
   req.log?.error({err:error,requestId}, 'Unhandled request error');
   if (res.headersSent) return next(error);
   const status = error.statusCode || (error.message?.includes('CORS') ? 403 : 500);
-  res.status(status).json({error: status >= 500 ? 'Internal server error' : error.message});
+  res.status(status).json({error: status >= 500 && !error.expose ? 'Internal server error' : error.message});
 });
 
 let server;

@@ -32,7 +32,16 @@ export function createApiRouter({ whatsapp, bot }) {
   router.post('/bot/stop', async (req,res,next)=>{try{await bot.stop();res.json(await getBotState())}catch(e){next(e)}});
 
   router.get('/whatsapp/status', (req,res)=>res.json(whatsapp.getStatus()));
-  router.post('/whatsapp/pairing', pairingLimiter, validate(pairingSchema), async (req,res,next)=>{try{const code=await whatsapp.requestPairingCode(req.body.phoneNumber);res.json({code})}catch(e){next(e)}});
+  router.post('/whatsapp/pairing', pairingLimiter, validate(pairingSchema), async (req,res,next)=>{
+    try {
+      const code = await whatsapp.requestPairingCode(req.body.phoneNumber);
+      res.json({ code });
+    } catch (error) {
+      error.statusCode = 502;
+      error.expose = true;
+      next(error);
+    }
+  });
   router.post('/whatsapp/reconnect', async (req,res,next)=>{try{await whatsapp.reconnect();res.json(whatsapp.getStatus())}catch(e){next(e)}});
   router.post('/whatsapp/logout', async (req,res,next)=>{try{await whatsapp.logout();res.json(whatsapp.getStatus())}catch(e){next(e)}});
 
