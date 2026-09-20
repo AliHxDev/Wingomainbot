@@ -1,4 +1,10 @@
 import * as Baileys from '@whiskeysockets/baileys';
+import { query } from '../db/index.mjs';
+import { env } from '../config/env.mjs';
+import { logger } from '../utils/logger.mjs';
+import { createDatabaseAuthState } from './whatsappAuth.mjs';
+import { getChannelConfig } from './channel.mjs';
+import { patchBotState } from './botState.mjs';
 
 const makeWASocket = typeof Baileys.default === 'function'
   ? Baileys.default
@@ -8,16 +14,32 @@ const makeWASocket = typeof Baileys.default === 'function'
 
 const Browsers = Baileys.Browsers;
 const DisconnectReason = Baileys.DisconnectReason;
+const fetchLatestBaileysVersion = Baileys.fetchLatestBaileysVersion;
+
+let cachedWaVersion = null;
+let waVersionPromise = null;
+
+async function getWhatsAppWebVersion() {
+  if (cachedWaVersion) return cachedWaVersion;
+  if (!waVersionPromise && typeof fetchLatestBaileysVersion === 'function') {
+    waVersionPromise = fetchLatestBaileysVersion()
+      .then(result => {
+        const version = Array.isArray(result?.version) ? result.version : null;
+        if (version) cachedWaVersion = version;
+        return version;
+      })
+      .catch(error => {
+        logger.warn({ err: error }, 'Unable to fetch latest WhatsApp Web version; using Baileys default');
+        return null;
+      })
+      .finally(() => { waVersionPromise = null; });
+  }
+  return waVersionPromise || null;
+}
 
 if (typeof makeWASocket !== 'function') {
   throw new Error('Baileys makeWASocket export is unavailable. Check the installed @whiskeysockets/baileys version.');
 }
-import { query } from '../db/index.mjs';
-import { env } from '../config/env.mjs';
-import { logger } from '../utils/logger.mjs';
-import { createDatabaseAuthState } from './whatsappAuth.mjs';
-import { getChannelConfig } from './channel.mjs';
-import { patchBotState } from './botState.mjs';
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -88,9 +110,11 @@ export class WhatsAppManager {
     // before Baileys emits a creds.update event.
     await this.auth.saveCreds();
 
+    const waVersion = await getWhatsAppWebVersion();
     const socket = makeWASocket({
       auth: this.auth.state,
       printQRInTerminal: false,
+      ...(waVersion ? { version: waVersion } : {}),
       browser: Browsers.macOS('Desktop'),
       syncFullHistory: false,
       markOnlineOnConnect: false,
@@ -215,6 +239,20 @@ export class WhatsAppManager {
     }, delay);
   }
 
+  async _disposeCurrentSocket() {
+    const socket = this.socket;
+    this.socket = null;
+    this.auth = null;
+    if (!socket) return;
+    try {
+      socket.ev?.removeAllListeners?.('creds.update');
+      socket.ev?.removeAllListeners?.('connection.update');
+      socket.ws?.close();
+    } catch (error) {
+      logger.debug({ err: error }, 'Failed closing previous WhatsApp socket');
+    }
+  }
+
   async requestPairingCode(phoneNumber) {
     this.stopped = false;
     if (this.pairingPromise) return this.pairingPromise;
@@ -240,16 +278,28 @@ export class WhatsAppManager {
     this.pairingRecoveryTimer = null;
     this.clearPairingExpiry();
 
-    // A previous interrupted pairing can leave an unregistered credential
-    // record and a half-open socket. Start pairing from a clean auth state.
-    if (this.auth && !this.auth.state.creds.registered) {
-      await this.auth.clear().catch(error => logger.warn({ err: error }, 'Failed clearing previous pairing state'));
+    // Pairing must always start a completely fresh, unregistered Baileys
+    // session. A reconnect socket left over from an earlier failed attempt can
+    // otherwise consume the pairing handshake and make WhatsApp reject the code.
+    if (this.creating) {
+      try {
+        const inFlightSocket = await this.creating;
+        if (inFlightSocket) {
+          try {
+            inFlightSocket.ev?.removeAllListeners?.('creds.update');
+            inFlightSocket.ev?.removeAllListeners?.('connection.update');
+            inFlightSocket.ws?.close();
+          } catch (error) {
+            logger.debug({ err: error }, 'Failed closing in-flight WhatsApp socket before pairing');
+          }
+        }
+      } catch (error) {
+        logger.debug({ err: error }, 'Previous WhatsApp socket creation failed before pairing');
+      }
     }
-    if (this.socket) {
-      const old = this.socket;
-      this.socket = null;
-      try { old.ev?.removeAllListeners?.('creds.update'); old.ev?.removeAllListeners?.('connection.update'); old.ws?.close(); } catch {}
-    }
+    await this._disposeCurrentSocket();
+    const previousAuth = await createDatabaseAuthState();
+    await previousAuth.clear().catch(error => logger.warn({ err: error }, 'Failed clearing previous WhatsApp auth state'));
     this.auth = null;
 
     let lastError = null;
